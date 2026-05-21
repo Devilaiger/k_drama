@@ -579,9 +579,75 @@ async def joined_handler(client: Client, callback_query: CallbackQuery):
         except Exception as e:
             logger.debug(f"joined_handler: edit_text failed for user {user_id}: {e}")
 
+@track_performance("get_links_pagination_handler")
+async def get_links_pagination_handler(client, callback_query: CallbackQuery):
+    """Handle /get_links pagination."""
+    try:
+        from bot.database.mongo import db
+        from bot.services.shows import get_category_shows
+        
+        parts = callback_query.data.split("|")
+        page = int(parts[1])
+        
+        # Fetch all shows
+        raw_categories = await db.shows.distinct("category")
+        all_shows_with_cat = []
+        for raw_cat in raw_categories:
+            canonical_cat = _LEGACY_CATEGORY_MAP.get(raw_cat, raw_cat)
+            cat_shows = await get_category_shows(canonical_cat)
+            for show_doc in cat_shows:
+                all_shows_with_cat.append({
+                    "show_name": show_doc.get("show_name", ""),
+                    "category": canonical_cat
+                })
+        
+        if not all_shows_with_cat:
+            return await safe_answer(callback_query, "No shows available.", show_alert=True)
+        
+        all_shows_with_cat.sort(key=lambda x: x["show_name"].lower())
+        
+        per_page = 10
+        total_pages = (len(all_shows_with_cat) + per_page - 1) // per_page
+        page = max(1, min(page, total_pages))
+        start_idx = (page - 1) * per_page
+        end_idx = start_idx + per_page
+        page_shows = all_shows_with_cat[start_idx:end_idx]
+        
+        me = await client.get_me()
+        bot_username = me.username
+        
+        text = f"📺 **All Shows** - Page {page}/{total_pages}\n\n"
+        buttons = []
+        for show_doc in page_shows:
+            title = show_doc.get("show_name", "Unknown")
+            cat = show_doc.get("category", "KDrama")
+            slug = normalize_show_slug(title)
+            cat_slug = cat.lower().replace(" ", "_")
+            url = f"https://t.me/{bot_username}?start={cat_slug}__{slug}"
+            
+            buttons.append([
+                InlineKeyboardButton(f"🎬 {title}", url=url)
+            ])
+        
+        nav_buttons = []
+        if page > 1:
+            nav_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"getlinks_page|{page-1}"))
+        nav_buttons.append(InlineKeyboardButton(f"{page}/{total_pages}", callback_data="noop"))
+        if page < total_pages:
+            nav_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"getlinks_page|{page+1}"))
+        buttons.append(nav_buttons)
+        
+        markup = InlineKeyboardMarkup(buttons)
+        await callback_query.message.edit_text(text, reply_markup=markup)
+        await safe_answer(callback_query)
+    except Exception as e:
+        logger.exception(f"get_links_pagination_handler error: {e}")
+        await safe_answer(callback_query, "Error loading page.", show_alert=True)
+
 def register_callback_handlers(app: Client):
     app.on_callback_query(filters.regex(r"^cat\|"))(category_handler)
     app.on_callback_query(filters.regex(r"^page\|"))(pagination_handler)
+    app.on_callback_query(filters.regex(r"^getlinks_page\|"))(get_links_pagination_handler)
     app.on_callback_query(filters.regex(r"^show\|"))(show_handler)
     app.on_callback_query(filters.regex(r"^season\|"))(season_handler)
     app.on_callback_query(filters.regex(r"^episode\|"))(episode_handler)

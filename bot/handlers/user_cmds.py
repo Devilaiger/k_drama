@@ -207,8 +207,13 @@ async def search_cmd(client: Client, message: Message):
             
             url = f"https://t.me/{bot_username}?start={cat_slug}__{slug}"
             buttons.append([InlineKeyboardButton(f"▶ {title} ({cat})", url=url)])
+        
+        # Handle topic-based groups: preserve message_thread_id
+        reply_kwargs = {"reply_markup": InlineKeyboardMarkup(buttons)}
+        if message.message_thread_id:
+            reply_kwargs["message_thread_id"] = message.message_thread_id
             
-        await message.reply(text, reply_markup=InlineKeyboardMarkup(buttons))
+        await message.reply(text, **reply_kwargs)
     except Exception as e:
         if loader: await loader.delete()
         logger.exception(f"search_cmd error: {e}")
@@ -340,6 +345,127 @@ async def support_text_handler(client: Client, message: Message):
     # Stop propagation so report_handlers text catcher doesn't also fire
     message.stop_propagation()
 
+@track_performance("get_links_cmd")
+async def get_links_cmd(client: Client, message: Message):
+    """Handle /get_links command - show links for dramas."""
+    query = ""
+    # Support /get_links <show_name> to search for specific show links
+    if len(message.command) > 1:
+        query = message.text.split(" ", 1)[1].strip()
+    
+    loader = await show_loading_sticker(client, message.chat.id)
+    
+    # Track user
+    await upsert_user(client, message.from_user, message.chat)
+    
+    try:
+        if query:
+            # Specific show search
+            results = await search_drama(query, limit=10)
+            if loader: await loader.delete()
+            
+            if not results:
+                return await message.reply(f"❌ No shows found matching '{query}'")
+            
+            me = await client.get_me()
+            bot_username = me.username
+            
+            text = f"🔗 **Links for '{query}':**\n\n"
+            buttons = []
+            for doc in results:
+                title = doc.get("show_name", "Unknown")
+                cat = doc.get("category", "KDrama")
+                slug = normalize_show_slug(title)
+                cat_slug = cat.lower().replace(" ", "_")
+                url = f"https://t.me/{bot_username}?start={cat_slug}__{slug}"
+                
+                buttons.append([
+                    InlineKeyboardButton(title, url=url)
+                ])
+            
+            reply_kwargs = {"reply_markup": InlineKeyboardMarkup(buttons)}
+            if message.message_thread_id:
+                reply_kwargs["message_thread_id"] = message.message_thread_id
+            await message.reply(text, **reply_kwargs)
+        else:
+            # List all shows with pagination (page 1 by default)
+            # Fetch all categories and shows
+            raw_categories = await db.shows.distinct("category")
+            
+            if not raw_categories:
+                if loader: await loader.delete()
+                return await message.reply("❌ No shows available.")
+            
+            # Build list of all shows across all categories
+            all_shows_with_cat = []
+            for raw_cat in raw_categories:
+                canonical_cat = _LEGACY_CATEGORY_MAP.get(raw_cat, raw_cat)
+                cat_shows = await get_category_shows(canonical_cat)
+                for show_doc in cat_shows:
+                    all_shows_with_cat.append({
+                        "show_name": show_doc.get("show_name", ""),
+                        "category": canonical_cat
+                    })
+            
+            if not all_shows_with_cat:
+                if loader: await loader.delete()
+                return await message.reply("❌ No shows available.")
+            
+            # Sort shows by name for consistent pagination
+            all_shows_with_cat.sort(key=lambda x: x["show_name"].lower())
+            
+            # Pagination: 10 shows per page
+            page = 1
+            per_page = 10
+            total_pages = (len(all_shows_with_cat) + per_page - 1) // per_page
+            start_idx = (page - 1) * per_page
+            end_idx = start_idx + per_page
+            page_shows = all_shows_with_cat[start_idx:end_idx]
+            
+            if loader: await loader.delete()
+            
+            me = await client.get_me()
+            bot_username = me.username
+            
+            text = f"📺 **All Shows** - Page {page}/{total_pages}\n\n"
+            buttons = []
+            for show_doc in page_shows:
+                title = show_doc.get("show_name", "Unknown")
+                cat = show_doc.get("category", "KDrama")
+                slug = normalize_show_slug(title)
+                cat_slug = cat.lower().replace(" ", "_")
+                url = f"https://t.me/{bot_username}?start={cat_slug}__{slug}"
+                
+                # Display: show name (left), link (right)
+                buttons.append([
+                    InlineKeyboardButton(f"🎬 {title}", url=url)
+                ])
+            
+            # Add pagination controls
+            if total_pages > 1:
+                nav_buttons = []
+                if page > 1:
+                    nav_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"getlinks_page|{page-1}"))
+                nav_buttons.append(InlineKeyboardButton(f"{page}/{total_pages}", callback_data="noop"))
+                if page < total_pages:
+                    nav_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"getlinks_page|{page+1}"))
+                buttons.append(nav_buttons)
+            
+            reply_kwargs = {"reply_markup": InlineKeyboardMarkup(buttons)}
+            if message.message_thread_id:
+                reply_kwargs["message_thread_id"] = message.message_thread_id
+            await message.reply(text, **reply_kwargs)
+            
+            asyncio.create_task(track_behavior(
+                message.from_user.id, 'get_links',
+                {'page': page, 'total_shows': len(all_shows_with_cat), 'source': 'command'}
+            ))
+            
+    except Exception as e:
+        if loader: await loader.delete()
+        logger.exception(f"get_links_cmd error: {e}")
+        await message.reply("❌ Error fetching show links.")
+
 async def request_cmd(client: Client, message: Message):
     if len(message.command) < 2:
         return await message.reply("Usage: /request <drama name>")
@@ -385,6 +511,7 @@ def register_user_handlers(app: Client):
         "📚 **K-Drama Bot Help**\n\n"
         "/start - Browse categories\n"
         "/search - Find dramas\n"
+        "/get_links - Show links for dramas\n"
         "/favorites - Your list\n"
         "/recent_updates - New content\n"
         "/request - Request a drama\n"
@@ -396,5 +523,6 @@ def register_user_handlers(app: Client):
     app.on_message(filters.command("request") & filters.private)(request_cmd)
     app.on_message(filters.command("history") & filters.private)(history_cmd)
     app.on_message(filters.command("search"))(search_cmd)
+    app.on_message(filters.command("get_links"))(get_links_cmd)
     # Support appeal: catches text from users in _support_waiting state at group=10
     app.on_message(filters.text & filters.private & ~filters.regex(r"^/"), group=10)(support_text_handler)

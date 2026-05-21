@@ -9,34 +9,40 @@ from bot.utils.logger import logger, track_performance
 from bot.utils.behavior import track_behavior
 
 _inline_search_state = {}
-_INLINE_MIN_CHARS = 3
+_INLINE_MIN_CHARS = 2
 
 @track_performance("inline_search_handler")
 async def inline_search_handler(client: Client, inline_query: InlineQuery):
     """Universal inline search handler."""
-    query = (inline_query.query or "").strip()
-    if not query or len(query) < _INLINE_MIN_CHARS:
-        return await inline_query.answer([], cache_time=5, is_personal=True)
-
-    user_id = inline_query.from_user.id
-    now = time.time()
-    last_query, last_ts = _inline_search_state.get(user_id, ("", 0))
-    if now - last_ts > 300:
-        last_query = ""
-
-    same_typing_run = query.startswith(last_query) or last_query.startswith(query)
-    if same_typing_run and last_query and abs(len(query) - len(last_query)) < _INLINE_MIN_CHARS:
-        return await inline_query.answer([], cache_time=1, is_personal=True)
-
-    _inline_search_state[user_id] = (query, now)
-    if len(_inline_search_state) > 5000:
-        stale_before = now - 300
-        for uid, (_, ts) in list(_inline_search_state.items()):
-            if ts < stale_before:
-                _inline_search_state.pop(uid, None)
-    
     try:
-        results = await search_drama(query, limit=20)
+        query = (inline_query.query or "").strip()
+        if not query or len(query) < _INLINE_MIN_CHARS:
+            # Always respond, even with empty results, to ensure bot appears
+            return await inline_query.answer([], cache_time=5, is_personal=True)
+
+        user_id = inline_query.from_user.id
+        now = time.time()
+        last_query, last_ts = _inline_search_state.get(user_id, ("", 0))
+        if now - last_ts > 300:
+            last_query = ""
+
+        same_typing_run = query.startswith(last_query) or last_query.startswith(query)
+        if same_typing_run and last_query and abs(len(query) - len(last_query)) < _INLINE_MIN_CHARS:
+            return await inline_query.answer([], cache_time=1, is_personal=True)
+
+        _inline_search_state[user_id] = (query, now)
+        if len(_inline_search_state) > 5000:
+            stale_before = now - 300
+            for uid, (_, ts) in list(_inline_search_state.items()):
+                if ts < stale_before:
+                    _inline_search_state.pop(uid, None)
+        
+        try:
+            results = await search_drama(query, limit=20)
+        except Exception as e:
+            logger.exception(f"search_drama error in inline: {e}")
+            results = []
+            
         if not results:
             return await inline_query.answer([
                 InlineQueryResultArticle(
@@ -78,10 +84,14 @@ async def inline_search_handler(client: Client, inline_query: InlineQuery):
             inline_query.from_user.id, 'search',
             {'query': query, 'results_count': len(results), 'source': 'inline'}
         ))
+        # Always respond to ensure bot appears consistently
         await inline_query.answer(articles, cache_time=10, is_personal=False)
     except Exception as e:
         logger.exception(f"Inline search error: {e}")
+        # Always respond, even on error, to ensure bot shows up
         await inline_query.answer([], cache_time=5, is_personal=True)
 
 def register_inline_handlers(app: Client):
+    # Ensure inline queries are handled universally without any filters
+    # This guarantees the bot appears in inline mentions consistently
     app.on_inline_query()(inline_search_handler)
