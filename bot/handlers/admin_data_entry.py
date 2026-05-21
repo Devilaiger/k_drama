@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Optional
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-
+from bot.handlers.user_cmds import get_links_cmd
 from bot.config import ADMIN_IDS
 from bot.database.mongo import db
 from bot.services.shows import _LEGACY_CATEGORY_MAP, get_cached_data
@@ -1196,7 +1196,7 @@ def register_admin_data_handlers(app: Client):
     app.on_callback_query(filters.regex(r"^max_profile_") & admin_filter)(max_profile_cb)
     app.on_callback_query(filters.regex(r"^report_view_user\|") & admin_filter)(report_view_user_cb)
     app.on_callback_query(filters.regex(r"^report_search_show\|") & admin_filter)(report_search_show_cb)
-    
+    app.on_message(filters.command("get_links") & admin_filter)(get_links_cmd)
     # Stateful reception
     # Poster handler runs at group -1 (higher priority than import at group 0).
     # This guarantees poster images are never intercepted by the import handler.

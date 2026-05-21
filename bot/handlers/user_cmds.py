@@ -189,8 +189,9 @@ async def search_cmd(client: Client, message: Message):
     try:
         results = await search_drama(query, limit=10)
         if loader: await loader.delete()
+        user_id = message.from_user.id if message.from_user else 0
         asyncio.create_task(track_behavior(
-            message.from_user.id, 'search',
+            user_id, 'search',
             {'query': query, 'results_count': len(results), 'source': 'command'}
         ))
         if not results:
@@ -210,12 +211,7 @@ async def search_cmd(client: Client, message: Message):
             url = f"https://t.me/{bot_username}?start={cat_slug}__{slug}"
             buttons.append([InlineKeyboardButton(f"▶ {title} ({cat})", url=url)])
         
-        # Handle topic-based groups: preserve message_thread_id
-        reply_kwargs = {"reply_markup": InlineKeyboardMarkup(buttons)}
-        if message.message_thread_id:
-            reply_kwargs["message_thread_id"] = message.message_thread_id
-            
-        await message.reply(text, **reply_kwargs)
+        await message.reply(text, reply_markup=InlineKeyboardMarkup(buttons))
     except Exception as e:
         if loader: await loader.delete()
         logger.exception(f"search_cmd error: {e}")
@@ -385,10 +381,7 @@ async def get_links_cmd(client: Client, message: Message):
                     InlineKeyboardButton(title, url=url)
                 ])
             
-            reply_kwargs = {"reply_markup": InlineKeyboardMarkup(buttons)}
-            if message.message_thread_id:
-                reply_kwargs["message_thread_id"] = message.message_thread_id
-            await message.reply(text, **reply_kwargs)
+            await message.reply(text, reply_markup=InlineKeyboardMarkup(buttons))
         else:
             # List all shows with pagination (page 1 by default)
             # Fetch all categories and shows
@@ -453,10 +446,7 @@ async def get_links_cmd(client: Client, message: Message):
                     nav_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"getlinks_page|{page+1}"))
                 buttons.append(nav_buttons)
             
-            reply_kwargs = {"reply_markup": InlineKeyboardMarkup(buttons)}
-            if message.message_thread_id:
-                reply_kwargs["message_thread_id"] = message.message_thread_id
-            await message.reply(text, **reply_kwargs)
+            await message.reply(text, reply_markup=InlineKeyboardMarkup(buttons))
             
             asyncio.create_task(track_behavior(
                 message.from_user.id, 'get_links',
@@ -525,6 +515,5 @@ def register_user_handlers(app: Client):
     app.on_message(filters.command("request") & filters.private)(request_cmd)
     app.on_message(filters.command("history") & filters.private)(history_cmd)
     app.on_message(filters.command("search"))(search_cmd)
-    app.on_message(filters.command("get_links"))(get_links_cmd)
     # Support appeal: catches text from users in _support_waiting state at group=10
     app.on_message(filters.text & filters.private & ~filters.regex(r"^/"), group=10)(support_text_handler)

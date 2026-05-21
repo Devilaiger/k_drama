@@ -1,8 +1,9 @@
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
+# Load environment variables from bot/.env
+load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
 # App Configuration
 API_ID = int(os.environ.get("API_ID", 0))
