@@ -1,6 +1,8 @@
 import asyncio
 import logging
-from pyrogram import Client, filters
+from pyrogram import filters
+from pyrogram.errors import FloodWait
+from pyrogram.client import Client
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from bot.config import ADMIN_IDS
 from bot.utils.ui import reply_with_ui, main_keyboard, safe_answer
