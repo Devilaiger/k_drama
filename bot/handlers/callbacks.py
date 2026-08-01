@@ -189,7 +189,45 @@ async def show_handler(client, callback_query: CallbackQuery):
         if isinstance(poster, list):
             poster = poster[-1] if poster else None
 
-        text = f"🎬 **{show_name}**\n📂 {category}\n\nSelect a season/episode:"
+        detail_lines = [f"🎬 **{show_name}**", f"📂 {category}"]
+        audio = show_doc.get("audio") or show_doc.get("audio_track") or show_doc.get("audio_lang")
+        genre = show_doc.get("genre")
+        release_year = show_doc.get("release_year") or show_doc.get("year")
+        subs = show_doc.get("subs") or show_doc.get("subtitles") or show_doc.get("subtitle")
+
+        def format_meta(value):
+            if isinstance(value, list):
+                return ", ".join(str(v) for v in value)
+            return str(value) if value is not None else ""
+
+        audio_text = format_meta(audio)
+        genre_text = format_meta(genre)
+        subs_text = format_meta(subs)
+        year_text = format_meta(release_year)
+
+        if audio_text:
+            detail_lines.append(f"🎙️ Audio: {audio_text}")
+        if subs_text:
+            detail_lines.append(f"💬 Subs: {subs_text}")
+        if genre_text:
+            detail_lines.append(f"🎭 Genre: {genre_text}")
+        if year_text:
+            detail_lines.append(f"📅 Release Year: {year_text}")
+        release_date = show_doc.get("release_date")
+        if release_date:
+            detail_lines.append(f"📅 Release Date: {release_date}")
+
+        is_hindi_only = False
+        if audio:
+            audio_values = audio if isinstance(audio, list) else [audio]
+            is_hindi_only = all(str(a).strip().lower() == "hindi" for a in audio_values if str(a).strip())
+
+        if subs_text and (not is_hindi_only or not audio_text):
+            detail_lines.append(f"💬 Subs: {subs_text}")
+
+        detail_lines.append("")
+        detail_lines.append("Select a season/episode:")
+        text = "\n".join(detail_lines)
         
         # Continuity Logic: If we already have a poster showing, just update it.
         # If not, and there is a poster, recreate the message to show photo.
@@ -250,9 +288,13 @@ async def season_handler(client, callback_query: CallbackQuery):
         buttons = []
         row = []
         for idx, ep in enumerate(episodes, 1):
-            cb_type = "multi" if isinstance(ep, list) else "episode"
-            ep_text = f"{idx}" + (" (S)" if isinstance(ep, list) else "")
-            row.append(InlineKeyboardButton(ep_text, callback_data=f"{cb_type}|{cat_id}|{show_id}|{s_id}|{idx}"))
+            if ep is None:
+                ep_text = f"{idx} ❌"
+                row.append(InlineKeyboardButton(ep_text, callback_data="noop"))
+            else:
+                cb_type = "multi" if isinstance(ep, list) else "episode"
+                ep_text = f"{idx}" + (" (S)" if isinstance(ep, list) else "")
+                row.append(InlineKeyboardButton(ep_text, callback_data=f"{cb_type}|{cat_id}|{show_id}|{s_id}|{idx}"))
             if len(row) == 4:
                 buttons.append(row)
                 row = []
@@ -294,7 +336,9 @@ async def episode_handler(client, callback_query: CallbackQuery):
             buttons = []
             row = []
             for q in sorted(qualities.keys()):
-                row.append(InlineKeyboardButton(q, callback_data=f"qual|{cat_id}|{show_id}|{s_id}|{ep_idx}|{q}"))
+                quality_payload = f"qual|{cat_id}|{show_id}|{s_id}|{ep_idx}|{q}"
+                quality_id = await make_id(quality_payload)
+                row.append(InlineKeyboardButton(q, callback_data=f"qual|{quality_id}"))
                 if len(row) == 3:
                     buttons.append(row)
                     row = []
@@ -354,7 +398,23 @@ async def quality_handler(client: Client, callback_query: CallbackQuery):
     """Handle quality selection playback."""
     try:
         parts = callback_query.data.split("|")
-        cat_id, show_id, s_id, ep_idx, quality = parts[1], parts[2], parts[3], int(parts[4]), parts[5]
+        if len(parts) == 2:
+            # New compact callback format: qual|quality_id
+            quality_id = parts[1]
+            qualitative_data = await resolve_id(quality_id)
+            qparts = qualitative_data.split("|", 5)
+            if len(qparts) == 6 and qparts[0] == "qual":
+                _, cat_id, show_id, s_id, ep_idx, quality = qparts
+            else:
+                return await safe_answer(callback_query, "Invalid quality callback.", show_alert=True)
+        elif len(parts) == 6:
+            # Legacy callback format: qual|cat_id|show_id|s_id|ep_idx|quality
+            _, cat_id, show_id, s_id, ep_idx, quality = parts
+            quality_id = None
+        else:
+            return await safe_answer(callback_query, "Invalid quality callback.", show_alert=True)
+
+        ep_idx = int(ep_idx)
         
         category = await resolve_id(cat_id)
         raw_show_name = await resolve_id(show_id)
@@ -367,15 +427,20 @@ async def quality_handler(client: Client, callback_query: CallbackQuery):
             return await safe_answer(callback_query, "Data not found.", show_alert=True)
 
         episode_data = episodes_dict[season][ep_idx-1]
-        media_data = episode_data["qualities"][quality]
+        quality_key = quality
+        if isinstance(episode_data, dict) and "qualities" in episode_data:
+            quality_key = next((q for q in episode_data["qualities"] if q.lower() == quality.lower()), quality)
+        media_data = episode_data["qualities"][quality_key]
         
         if isinstance(media_data, list):
             buttons = []
             for idx, part_data in enumerate(media_data, 1):
                 if part_data is not None:
-                    # Compact format: qp|cat|show|season|ep.quality.part
-                    # Keeps under Telegram's 64-byte callback limit
-                    cb_data = f"qp|{cat_id}|{show_id}|{s_id}|{ep_idx}.{quality}.{idx}"
+                    # Use the actual quality label in the qpart payload.
+                    # This avoids a stale/hashed quality callback being stored as the qpart key.
+                    qpart_payload = f"qp|{cat_id}|{show_id}|{s_id}|{ep_idx}|{quality}"
+                    qpart_id = await make_id(qpart_payload)
+                    cb_data = f"qp|{qpart_id}|{idx}"
                     buttons.append([InlineKeyboardButton(f"▶️ Part {idx}", callback_data=cb_data)])
                 
             buttons.append([InlineKeyboardButton("🔙 Back", callback_data=f"episode|{cat_id}|{show_id}|{s_id}|{ep_idx}")])
@@ -395,12 +460,25 @@ async def quality_handler(client: Client, callback_query: CallbackQuery):
 async def qpart_handler(client: Client, callback_query: CallbackQuery):
     """Handle split part playback inside a specific quality."""
     try:
-        # Compact format: qp|cat_id|show_id|s_id|ep.quality.part
         parts = callback_query.data.split("|")
-        cat_id, show_id, s_id = parts[1], parts[2], parts[3]
-        # Last segment packs ep_idx, quality, and part_idx with dots
-        tail = parts[4].split(".")
-        ep_idx, quality, p_idx = int(tail[0]), tail[1], int(tail[2])
+        if len(parts) == 3:
+            # New compact callback format: qp|qpart_id|part_idx
+            qpart_id, p_idx = parts[1], int(parts[2])
+            qpart_payload = await resolve_id(qpart_id)
+            qp_parts = qpart_payload.split("|", 5)
+            if len(qp_parts) != 6 or qp_parts[0] != "qp":
+                return await safe_answer(callback_query, "Invalid split-part callback.", show_alert=True)
+            _, cat_id, show_id, s_id, ep_idx, quality_id = qp_parts
+            quality = await resolve_id(quality_id)
+        elif len(parts) == 7:
+            # Legacy callback format: qp|cat_id|show_id|s_id|ep_idx|quality|part_idx
+            _, cat_id, show_id, s_id, ep_idx, quality, part_idx = parts
+            qpart_id = None
+            p_idx = int(part_idx)
+        else:
+            return await safe_answer(callback_query, "Invalid split-part callback.", show_alert=True)
+
+        ep_idx = int(ep_idx)
         
         category = await resolve_id(cat_id)
         raw_show_name = await resolve_id(show_id)

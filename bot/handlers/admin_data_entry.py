@@ -64,6 +64,63 @@ CATEGORY_ALIASES = {
     "anime": "Anime"
 }
 
+KNOWN_CATEGORIES = {canonical for canonical in CATEGORY_ALIASES.values()}
+
+METADATA_CATEGORY_COMMANDS = {
+    "add_audio": "K-Hindi",
+    "set_audio": "K-Hindi",
+    "add_genre": "K-Hindi",
+    "set_genre": "K-Hindi",
+    "add_subs": "K-Hindi",
+    "set_subs": "K-Hindi",
+    "add_audio_orig": "K-Original",
+    "set_audio_orig": "K-Original",
+    "add_genre_orig": "K-Original",
+    "set_genre_orig": "K-Original",
+    "add_subs_orig": "K-Original",
+    "set_subs_orig": "K-Original",
+    "add_audio_jap": "Japanese Drama",
+    "set_audio_jap": "Japanese Drama",
+    "add_genre_jap": "Japanese Drama",
+    "set_genre_jap": "Japanese Drama",
+    "add_subs_jap": "Japanese Drama",
+    "set_subs_jap": "Japanese Drama",
+    "add_audio_c": "CT Drama",
+    "set_audio_c": "CT Drama",
+    "add_genre_c": "CT Drama",
+    "set_genre_c": "CT Drama",
+    "add_subs_c": "CT Drama",
+    "set_subs_c": "CT Drama",
+    "add_audio_glb": "Global",
+    "set_audio_glb": "Global",
+    "add_genre_glb": "Global",
+    "set_genre_glb": "Global",
+    "add_subs_glb": "Global",
+    "set_subs_glb": "Global",
+    "add_audio_pak": "Pakistan",
+    "set_audio_pak": "Pakistan",
+    "add_genre_pak": "Pakistan",
+    "set_genre_pak": "Pakistan",
+    "add_subs_pak": "Pakistan",
+    "set_subs_pak": "Pakistan",
+    "add_audio_anime": "Anime",
+    "set_audio_anime": "Anime",
+    "add_genre_anime": "Anime",
+    "set_genre_anime": "Anime",
+    "add_subs_anime": "Anime",
+    "set_subs_anime": "Anime",
+}
+
+RELEASE_DATE_CATEGORY_COMMANDS = {
+    "set_release_date": "K-Hindi",
+    "set_release_date_orig": "K-Original",
+    "set_release_date_jap": "Japanese Drama",
+    "set_release_date_c": "CT Drama",
+    "set_release_date_glb": "Global",
+    "set_release_date_pak": "Pakistan",
+    "set_release_date_anime": "Anime",
+}
+
 # State management
 # user_id -> state_dict  with 'timestamp' key for stale detection
 import_state = {}
@@ -98,17 +155,58 @@ async def _find_show_for_admin_action(data: dict, category: str, show_input: str
     return None
 
 
+QUALITY_PATTERN = r'^[0-9]+(?:p|k)?(?:-10bit)?(?:\s+Hevc)?$'
+
+SEASON_TOKEN_PATTERN = r'^[Ss]?(\d+)$'
+EPISODE_TOKEN_PATTERN = r'^[Ee]?(\d+)$'
+
+
 def _parse_delete_tail(tokens: list[str]) -> tuple[str | None, int | None, str | None] | None:
     """Parse optional season/episode/quality tokens after a resolved show name."""
     parts = tokens[:]
     quality = None
-    if parts and parts[-1].lower() in ["480p", "720p", "1080p", "4k"]:
-        quality = parts.pop().lower()
+
+    # Ignore a trailing part indicator like P1 / p1 or I / i;
+    # delete operates at the quality level and does not need the part index.
+    while parts and re.match(r'^(?:[Pp]\d+|[Ii])$', parts[-1]):
+        parts.pop()
+
+    # Accept quality labels with modifiers, e.g. 720p-10bit, 1080p-10bit Hevc.
+    for split_at in range(len(parts), 0, -1):
+        candidate = " ".join(parts[split_at - 1:])
+        if re.match(QUALITY_PATTERN, candidate, re.I):
+            quality = re.sub(r'\s+', ' ', candidate).strip()
+            parts = parts[: split_at - 1]
+            break
 
     if not parts:
         return (None, None, None) if quality is None else None
 
     season_number = None
+    episode_num = None
+    if len(parts) == 1:
+        token = parts[0]
+        season_match = re.match(SEASON_TOKEN_PATTERN, token)
+        if season_match:
+            season_number = season_match.group(1)
+        else:
+            return None
+    elif len(parts) == 2:
+        season_token, episode_token = parts
+        season_match = re.match(SEASON_TOKEN_PATTERN, season_token)
+        episode_match = re.match(EPISODE_TOKEN_PATTERN, episode_token)
+        if season_match and episode_match:
+            season_number = season_match.group(1)
+            episode_num = int(episode_match.group(1))
+        else:
+            return None
+    else:
+        return None
+
+    if quality and not (season_number and episode_num):
+        return None
+
+    return season_number, episode_num, quality
     episode_num = None
     if len(parts) == 1:
         token = parts[0]
@@ -148,6 +246,358 @@ def _get_state(state_dict: dict, user_id: int) -> Optional[dict]:
         state_dict.pop(user_id, None)
         return None
     return state
+
+
+def _normalize_meta_value(value: str) -> str:
+    value = value.strip()
+    if not value:
+        return ""
+    if value.isdigit():
+        return value
+    return " ".join(part.capitalize() for part in value.split())
+
+
+def _normalize_list_values(raw_value: str) -> list[str]:
+    if not raw_value:
+        return []
+    items = re.split(r'[;,|/]+', raw_value)
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        value = _normalize_meta_value(item)
+        if not value:
+            continue
+        key = value.lower()
+        if key not in seen:
+            seen.add(key)
+            normalized.append(value)
+    return normalized
+
+
+def _resolve_command_category(category: str | None) -> str | None:
+    if not category:
+        return None
+    normalized = category.strip()
+    lower_key = normalized.lower()
+    if lower_key in CATEGORY_ALIASES:
+        return CATEGORY_ALIASES[lower_key]
+    canonical = normalized.title()
+    if canonical in KNOWN_CATEGORIES:
+        return canonical
+    return None
+
+
+def _extract_category_from_values(values_text: str) -> tuple[str | None, str]:
+    """If the first value token is a category alias, separate it from the remaining values."""
+    if not values_text:
+        return None, ""
+    parts = values_text.strip().split(None, 1)
+    if not parts:
+        return None, ""
+    if len(parts) == 1:
+        return None, values_text
+    resolved_category = _resolve_command_category(parts[0])
+    if resolved_category:
+        remaining = parts[1].strip()
+        return resolved_category, remaining
+    return None, values_text
+
+
+async def _resolve_show(category: str | None, show_name: str) -> tuple[str, dict] | None:
+    query = {"show_name": {"$regex": f"^{re.escape(show_name)}$", "$options": "i"}}
+    if category:
+        query["category"] = _resolve_command_category(category)
+    show_doc = await db.shows.find_one(query)
+    if show_doc:
+        return show_doc["show_name"], show_doc
+    if category:
+        alias_cat = CATEGORY_ALIASES.get(category.lower())
+        if alias_cat:
+            query["category"] = alias_cat
+            show_doc = await db.shows.find_one(query)
+            if show_doc:
+                return show_doc["show_name"], show_doc
+    return None
+
+
+async def _set_list_field(category: str, show_name: str, field_name: str, values: list[str]):
+    await db.shows.update_one(
+        {"category": category, "show_name": show_name},
+        {"$set": {field_name: values}}
+    )
+
+
+async def _append_list_field(category: str, show_name: str, field_name: str, values: list[str]):
+    show_doc = await db.shows.find_one(
+        {"category": category, "show_name": show_name},
+        {field_name: 1}
+    )
+    if not show_doc:
+        return None
+    current = show_doc.get(field_name)
+    if isinstance(current, list):
+        merged = current[:]
+    elif current:
+        merged = [current]
+    else:
+        merged = []
+    existing_lower = {v.lower() for v in merged}
+    for value in values:
+        if value.lower() not in existing_lower:
+            merged.append(value)
+            existing_lower.add(value.lower())
+    await db.shows.update_one(
+        {"category": category, "show_name": show_name},
+        {"$set": {field_name: merged}}
+    )
+    return merged
+
+
+async def _update_show_cache(category: str, show_name: str):
+    from bot.utils.cache import layered_cache, _make_show_cache_key
+    from bot.utils.ids import normalize_show_slug
+    cache_key = _make_show_cache_key(category, normalize_show_slug(show_name))
+    layered_cache.invalidate_show(cache_key)
+
+
+def _parse_metadata_command_args(args_text: str) -> tuple[str | None, str | None, str]:
+    show_name = None
+    category = None
+    values = ""
+    if not args_text:
+        return None, None, ""
+    if ">" in args_text:
+        left, right = args_text.split(">", 1)
+        show_name = left.strip().strip('"')
+        right = right.strip()
+        if right:
+            parts = right.split(None, 1)
+            category = parts[0].strip()
+            values = parts[1].strip() if len(parts) > 1 else ""
+        return show_name, category, values
+
+    quoted = re.match(r'^"([^"]+)"\s*(.*)$', args_text)
+    if quoted:
+        return quoted.group(1).strip(), None, quoted.group(2).strip()
+
+    # If metadata keys start after the show name, split at the first key token.
+    match = re.search(r'\b(audio|genre|subs|subtitles|year|release_year)\s*=', args_text, re.I)
+    if match:
+        show_name = args_text[:match.start()].strip().strip('"')
+        values = args_text[match.start():].strip()
+        return show_name, None, values
+
+    parts = args_text.split(None, 1)
+    show_name = parts[0].strip()
+    values = parts[1].strip() if len(parts) > 1 else ""
+    return show_name, None, values
+
+
+def _parse_metadata_kv_pairs(values_text: str) -> dict[str, object]:
+    pairs: dict[str, object] = {}
+    if not values_text:
+        return pairs
+    pattern = re.compile(
+        r'(audio|genre|subs|subtitles|year|release_year|release_date)\s*=\s*'
+        r'(?:"([^"]+)"|([^"\s][^=]*?))'
+        r'(?=\s+(?:audio|genre|subs|subtitles|year|release_year|release_date)\s*=|$)',
+        re.I
+    )
+    for match in pattern.finditer(values_text):
+        key = match.group(1).lower()
+        raw_val = match.group(2) or match.group(3) or ""
+        raw_val = raw_val.strip()
+        if key in ["audio", "genre", "subs", "subtitles"]:
+            pairs[key] = _normalize_list_values(raw_val)
+        elif key in ["year", "release_year"]:
+            year_val = raw_val.strip()
+            pairs["release_year"] = int(year_val) if year_val.isdigit() else year_val
+        elif key == "release_date":
+            pairs["release_date"] = _normalize_meta_value(raw_val)
+    return pairs
+
+
+async def _apply_metadata_update(client: Client, message: Message, action: str, field_name: str, command_name: str, show_name: str | None, category: str | None, values_text: str):
+    if not show_name:
+        return await message.reply(
+            f"❌ Invalid format. Use `/{action}_{field_name} \"Show Name\" value1,value2` or `/{action}_{field_name} \"Show Name\" > category value1,value2`."
+        )
+    if not values_text:
+        return await message.reply(
+            f"❌ No values provided. Usage: `/{action}_{field_name} \"Show Name\" value1,value2` or `/{action}_{field_name} \"Show Name\" > category value1,value2`."
+        )
+
+    category_from_values, remaining_values = _extract_category_from_values(values_text)
+    default_category = METADATA_CATEGORY_COMMANDS.get(command_name, "K-Hindi")
+    resolved_category = _resolve_command_category(category) or category_from_values or default_category
+    values = _normalize_list_values(remaining_values if category_from_values else values_text)
+    if not values:
+        return await message.reply("❌ No valid values provided.")
+
+    resolved = await _resolve_show(resolved_category, show_name)
+    if not resolved:
+        return await message.reply(f"❌ Show '{show_name}' not found in {resolved_category}.")
+
+    actual_show_name, _ = resolved
+    if action == "set":
+        await _set_list_field(resolved_category, actual_show_name, field_name, values)
+        await _update_show_cache(resolved_category, actual_show_name)
+        return await message.reply(f"✅ Set {field_name} for **{actual_show_name}**: {', '.join(values)}")
+
+    merged = await _append_list_field(resolved_category, actual_show_name, field_name, values)
+    await _update_show_cache(resolved_category, actual_show_name)
+    return await message.reply(f"✅ Added {field_name} to **{actual_show_name}**: {', '.join(values)}")
+
+
+async def add_audio_cmd(client: Client, message: Message):
+    args_text = message.text.split(" ", 1)[1].strip() if len(message.command) > 1 else ""
+    show_name, category, values_text = _parse_metadata_command_args(args_text)
+    return await _apply_metadata_update(client, message, "add", "audio", message.command[0].lower(), show_name, category, values_text)
+
+
+async def set_audio_cmd(client: Client, message: Message):
+    args_text = message.text.split(" ", 1)[1].strip() if len(message.command) > 1 else ""
+    show_name, category, values_text = _parse_metadata_command_args(args_text)
+    return await _apply_metadata_update(client, message, "set", "audio", message.command[0].lower(), show_name, category, values_text)
+
+
+async def add_genre_cmd(client: Client, message: Message):
+    args_text = message.text.split(" ", 1)[1].strip() if len(message.command) > 1 else ""
+    show_name, category, values_text = _parse_metadata_command_args(args_text)
+    return await _apply_metadata_update(client, message, "add", "genre", message.command[0].lower(), show_name, category, values_text)
+
+
+async def set_genre_cmd(client: Client, message: Message):
+    args_text = message.text.split(" ", 1)[1].strip() if len(message.command) > 1 else ""
+    show_name, category, values_text = _parse_metadata_command_args(args_text)
+    return await _apply_metadata_update(client, message, "set", "genre", message.command[0].lower(), show_name, category, values_text)
+
+
+async def add_subs_cmd(client: Client, message: Message):
+    args_text = message.text.split(" ", 1)[1].strip() if len(message.command) > 1 else ""
+    show_name, category, values_text = _parse_metadata_command_args(args_text)
+    return await _apply_metadata_update(client, message, "add", "subs", message.command[0].lower(), show_name, category, values_text)
+
+
+async def set_subs_cmd(client: Client, message: Message):
+    args_text = message.text.split(" ", 1)[1].strip() if len(message.command) > 1 else ""
+    show_name, category, values_text = _parse_metadata_command_args(args_text)
+    return await _apply_metadata_update(client, message, "set", "subs", message.command[0].lower(), show_name, category, values_text)
+
+
+async def set_metadata_cmd(client: Client, message: Message):
+    args_text = message.text.split(" ", 1)[1].strip() if len(message.command) > 1 else ""
+    show_name, category, values_text = _parse_metadata_command_args(args_text)
+    if not show_name or not values_text:
+        return await message.reply(
+            "❌ Invalid format. Use `/set_metadata \"Show Name\" audio=Hindi,English subs=English,Hindi genre=Romance,Drama year=2026`."
+        )
+
+    resolved_category = _resolve_command_category(category) or "K-Hindi"
+    resolved = await _resolve_show(resolved_category, show_name)
+    if not resolved:
+        return await message.reply(f"❌ Show '{show_name}' not found in {resolved_category}.")
+
+    actual_show_name, _ = resolved
+    pairs = _parse_metadata_kv_pairs(values_text)
+    if not pairs:
+        return await message.reply(
+            "❌ No valid metadata pairs found. Use keys audio, genre, subs, year. Example: audio=Hindi,English subs=English,Hindi genre=Romance,Drama year=2026"
+        )
+
+    if "subtitles" in pairs:
+        pairs["subs"] = pairs.pop("subtitles")
+
+    update_data: dict[str, object] = {}
+    if "audio" in pairs:
+        update_data["audio"] = pairs["audio"]
+    if "genre" in pairs:
+        update_data["genre"] = pairs["genre"]
+    if "subs" in pairs:
+        update_data["subs"] = pairs["subs"]
+    if "release_year" in pairs:
+        update_data["release_year"] = pairs["release_year"]
+
+    await db.shows.update_one(
+        {"category": resolved_category, "show_name": actual_show_name},
+        {"$set": update_data}
+    )
+    await _update_show_cache(resolved_category, actual_show_name)
+
+    summary: list[str] = []
+    if "audio" in update_data:
+        audio_values = update_data["audio"]
+        if isinstance(audio_values, list):
+            summary.append(f"Audio: {', '.join(audio_values)}")
+    if "genre" in update_data:
+        genre_values = update_data["genre"]
+        if isinstance(genre_values, list):
+            summary.append(f"Genre: {', '.join(genre_values)}")
+    if "subs" in update_data:
+        subs_values = update_data["subs"]
+        if isinstance(subs_values, list):
+            summary.append(f"Subs: {', '.join(subs_values)}")
+    if "release_year" in update_data:
+        summary.append(f"Year: {update_data['release_year']}")
+    if "release_date" in update_data:
+        summary.append(f"Release Date: {update_data['release_date']}")
+
+    return await message.reply(f"✅ Updated metadata for **{actual_show_name}**:\n" + "\n".join(summary))
+
+
+def _parse_release_date_args(args_text: str) -> tuple[str | None, str | None, str]:
+    show_name = None
+    category = None
+    release_date = ""
+    if not args_text:
+        return None, None, ""
+    if ">" in args_text:
+        left, right = args_text.split(">", 1)
+        show_name = left.strip().strip('"')
+        right = right.strip()
+        if right:
+            parts = right.split(None, 1)
+            category = parts[0].strip()
+            release_date = parts[1].strip() if len(parts) > 1 else ""
+        return show_name, category, release_date
+
+    quoted = re.match(r'^"([^"]+)"\s+(.*)$', args_text)
+    if quoted:
+        return quoted.group(1).strip(), None, quoted.group(2).strip()
+
+    parts = args_text.split(None, 1)
+    show_name = parts[0].strip()
+    release_date = parts[1].strip() if len(parts) > 1 else ""
+    return show_name, None, release_date
+
+
+async def _apply_release_date_update(client: Client, message: Message, command_name: str, show_name: str | None, category: str | None, release_date: str):
+    if not show_name or not release_date:
+        return await message.reply(
+            f"❌ Invalid format. Use `/{command_name} \"Show Name\" April 2, 2026` or `/{command_name} \"Show Name\" > category April 2, 2026`."
+        )
+
+    resolved_category = _resolve_command_category(category) or RELEASE_DATE_CATEGORY_COMMANDS.get(command_name, "K-Hindi")
+    resolved = await _resolve_show(resolved_category, show_name)
+    if not resolved:
+        return await message.reply(f"❌ Show '{show_name}' not found in {resolved_category}.")
+
+    actual_show_name, _ = resolved
+    await db.shows.update_one(
+        {"category": resolved_category, "show_name": actual_show_name},
+        {"$set": {"release_date": _normalize_meta_value(release_date)}}
+    )
+    await _update_show_cache(resolved_category, actual_show_name)
+
+    return await message.reply(
+        f"✅ Set release date for **{actual_show_name}** in {resolved_category}: {_normalize_meta_value(release_date)}"
+    )
+
+
+async def set_release_date_cmd(client: Client, message: Message):
+    args_text = message.text.split(" ", 1)[1].strip() if len(message.command) > 1 else ""
+    show_name, category, release_date = _parse_release_date_args(args_text)
+    return await _apply_release_date_update(client, message, message.command[0].lower(), show_name, category, release_date)
 
 
 admin_filter = filters.user(ADMIN_IDS)
@@ -204,23 +654,31 @@ async def import_command_handler(client: Client, message: Message):
         )
 
     # Parsing (Same logic as monolith)
-    # 1. Quoted: "Show Name" S1 E3 720p
-    match = re.match(r'"([^"]+)"\s+[Ss](\d+)\s+[Ee](\d+)\s+(\d+)p?(?:\s+[Pp](\d+))?', args_text)
+    # 1. Quoted: "Show Name" S1 E3 720p-10bit
+    match = re.match(
+        r'"([^"]+)"\s+[Ss](\d+)\s+[Ee](\d+)\s+([0-9]+(?:p|k)?(?:-10bit)?(?:\s+Hevc)?)\s*(?:[Pp](\d+))?',
+        args_text,
+        re.I
+    )
     if not match:
-        # 2. Unquoted: Show_Name S1 E3 720p or Show Name S1 E3 720p
-        match = re.match(r'(.+?)\s+[Ss](\d+)\s+[Ee](\d+)\s+(\d+)p?(?:\s+[Pp](\d+))?', args_text)
+        # 2. Unquoted: Show_Name S1 E3 720p-10bit or Show Name S1 E3 720p-10bit
+        match = re.match(
+            r'(.+?)\s+[Ss](\d+)\s+[Ee](\d+)\s+([0-9]+(?:p|k)?(?:-10bit)?(?:\s+Hevc)?)\s*(?:[Pp](\d+))?',
+            args_text,
+            re.I
+        )
 
     if not match:
         return await message.reply(
             f"❌ **Invalid format**\n\n"
-            f"**Usage:** `/{cmd} Show_Name S1 E1 720p`\n"
-            f"**Example:** `/{cmd} \"My Drama\" S1 E1 720p`"
+            f"**Usage:** `/{cmd} Show_Name S1 E1 720p-10bit`\n"
+            f"**Example:** `/{cmd} \"My Drama\" S1 E1 720p-10bit P1`"
         )
 
     show_name_input = match.group(1).strip()
     season_str = match.group(2)
     episode_num = int(match.group(3))
-    quality = match.group(4) + "p" if not match.group(4).endswith("p") else match.group(4)
+    quality = re.sub(r'\s+', ' ', match.group(4).strip())
     part_num = int(match.group(5)) if match.group(5) else None
 
     # Validate Show and Category — direct DB query, no full cache load
@@ -550,6 +1008,10 @@ async def add_show_cmd(client: Client, message: Message):
                 "show_name": show_name,
                 "episodes": {},
                 "poster": [],
+                "audio": [],
+                "genre": [],
+                "subs": [],
+                "release_year": None,
                 "created_at": datetime.now()
             })
             await message.reply(f"Added show: **{show_name}** under **{category}**")
@@ -578,7 +1040,17 @@ async def add_show_cmd(client: Client, message: Message):
         logger.exception(f"Add show error: {e}")
         await message.reply(f"❌ Error adding show: {e}")
 
-@track_performance("delete_command_handler")
+
+def _resolve_quality_key(qualities: dict, requested_quality: str) -> str | None:
+    if requested_quality in qualities:
+        return requested_quality
+    lower_requested = requested_quality.lower()
+    for key in qualities:
+        if key.lower() == lower_requested:
+            return key
+    return None
+
+
 async def delete_command_handler(client: Client, message: Message):
     """Delete a show, season, episode, or quality."""
     cmd = message.command[0]
@@ -636,15 +1108,17 @@ async def delete_command_handler(client: Client, message: Message):
         episodes = doc.get("episodes", {}).get(season_key, [])
         if ep_idx < len(episodes):
             ep = episodes[ep_idx]
-            if isinstance(ep, dict) and "qualities" in ep and quality in ep["qualities"]:
-                del ep["qualities"][quality]
-                episodes[ep_idx] = ep
-                await db.shows.update_one({"_id": doc["_id"]}, {"$set": {f"episodes.{season_key}": episodes}})
-                from bot.utils.cache import layered_cache, _make_show_cache_key
-                from bot.utils.ids import normalize_show_slug
-                cache_key = _make_show_cache_key(category, normalize_show_slug(actual_show_name))
-                layered_cache.invalidate_show(cache_key)
-                return await message.reply(f"✅ Deleted **{quality}** from **S{season_key} E{episode_num}** of **{actual_show_name}**.")
+            if isinstance(ep, dict) and "qualities" in ep:
+                resolved_quality = _resolve_quality_key(ep["qualities"], quality)
+                if resolved_quality:
+                    del ep["qualities"][resolved_quality]
+                    episodes[ep_idx] = ep
+                    await db.shows.update_one({"_id": doc["_id"]}, {"$set": {f"episodes.{season_key}": episodes}})
+                    from bot.utils.cache import layered_cache, _make_show_cache_key
+                    from bot.utils.ids import normalize_show_slug
+                    cache_key = _make_show_cache_key(category, normalize_show_slug(actual_show_name))
+                    layered_cache.invalidate_show(cache_key)
+                    return await message.reply(f"✅ Deleted **{resolved_quality}** from **S{season_key} E{episode_num}** of **{actual_show_name}**.")
         return await message.reply("❌ Quality/Episode not found.")
 
     if episode_num and season_number:
@@ -1183,6 +1657,16 @@ def register_admin_data_handlers(app: Client):
     
     # Poster commands
     app.on_message(filters.command(list(POSTER_CATEGORY_COMMANDS.keys()) + ["add_poster"]) & admin_filter & filters.private)(add_poster_command)
+    
+    # Metadata commands
+    app.on_message(filters.command("add_audio") & admin_filter & filters.private)(add_audio_cmd)
+    app.on_message(filters.command("set_audio") & admin_filter & filters.private)(set_audio_cmd)
+    app.on_message(filters.command("add_genre") & admin_filter & filters.private)(add_genre_cmd)
+    app.on_message(filters.command("set_genre") & admin_filter & filters.private)(set_genre_cmd)
+    app.on_message(filters.command("add_subs") & admin_filter & filters.private)(add_subs_cmd)
+    app.on_message(filters.command("set_subs") & admin_filter & filters.private)(set_subs_cmd)
+    app.on_message(filters.command("set_metadata") & admin_filter & filters.private)(set_metadata_cmd)
+    app.on_message(filters.command(list(RELEASE_DATE_CATEGORY_COMMANDS.keys())) & admin_filter & filters.private)(set_release_date_cmd)
     
     # General Admin
     app.on_message(filters.command(["add", "add_hindi", "add_orig", "add_jap", "add_c", "add_glb", "add_pak", "add_anime"]) & admin_filter & filters.private)(add_show_cmd)
