@@ -217,14 +217,6 @@ async def show_handler(client, callback_query: CallbackQuery):
         if release_date:
             detail_lines.append(f"📅 Release Date: {release_date}")
 
-        is_hindi_only = False
-        if audio:
-            audio_values = audio if isinstance(audio, list) else [audio]
-            is_hindi_only = all(str(a).strip().lower() == "hindi" for a in audio_values if str(a).strip())
-
-        if subs_text and (not is_hindi_only or not audio_text):
-            detail_lines.append(f"💬 Subs: {subs_text}")
-
         detail_lines.append("")
         detail_lines.append("Select a season/episode:")
         text = "\n".join(detail_lines)
